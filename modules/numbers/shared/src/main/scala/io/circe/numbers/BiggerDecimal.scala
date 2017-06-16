@@ -3,7 +3,6 @@ package io.circe.numbers
 import java.io.Serializable
 import java.lang.StringBuilder
 import java.math.{ BigDecimal, BigInteger }
-import scala.annotation.switch
 
 /**
  * Represents a large decimal number.
@@ -192,10 +191,12 @@ final object BiggerDecimal {
     final override def toString: String = "-0"
   }
 
-  private[this] def fromUnscaledAndScale(unscaled: BigInteger, scale: Long): BiggerDecimal =
+  final def apply(unscaled: BigInteger, scale: BigInteger): BiggerDecimal = new SigAndExp(unscaled, scale)
+
+  private[this] def fromUnscaledAndIntScale(unscaled: BigInteger, scale: Int): BiggerDecimal =
     if (unscaled == BigInteger.ZERO) UnsignedZero else {
       var current = unscaled
-      var depth = scale
+      var depth = scale.toLong
 
       var divAndRem = current.divideAndRemainder(BigInteger.TEN)
 
@@ -208,9 +209,9 @@ final object BiggerDecimal {
       new SigAndExp(current, BigInteger.valueOf(depth))
     }
 
-  def fromBigInteger(i: BigInteger): BiggerDecimal = fromUnscaledAndScale(i, 0L)
-  def fromBigDecimal(d: BigDecimal): BiggerDecimal = fromUnscaledAndScale(d.unscaledValue, d.scale.toLong)
-  def fromLong(d: Long): BiggerDecimal = fromUnscaledAndScale(BigInteger.valueOf(d), 0L)
+  def fromBigInteger(i: BigInteger): BiggerDecimal = fromUnscaledAndIntScale(i, 0)
+  def fromBigDecimal(d: BigDecimal): BiggerDecimal = fromUnscaledAndIntScale(d.unscaledValue, d.scale)
+  def fromLong(d: Long): BiggerDecimal = fromUnscaledAndIntScale(BigInteger.valueOf(d), 0)
 
   /**
    * Convert a [[scala.Double]] into a [[BiggerDecimal]].
@@ -226,30 +227,15 @@ final object BiggerDecimal {
     NegativeZero
   } else fromBigDecimal(new BigDecimal(java.lang.Float.toString(f)))
 
-  private[this] final val MaxLongString = "9223372036854775807"
-  private[this] final val MinLongString = "-9223372036854775808"
-
-  /**
-   * Is a string representing an integral value a valid [[scala.Long]]?
-   *
-   * Note that this method assumes that the input is a valid integral JSON
-   * number string (e.g. that it does have leading zeros).
-   */
-  def integralIsValidLong(s: String): Boolean = {
-    val bound = if (s.charAt(0) == '-') MinLongString else MaxLongString
-
-    s.length < bound.length || (s.length == bound.length && s.compareTo(bound) <= 0)
+  private[this] final val parser: JsonNumberParser[BiggerDecimal] = new JsonNumberParser[BiggerDecimal] {
+    def createNegativeZero: BiggerDecimal = NegativeZero
+    def createUnsignedZero: BiggerDecimal = UnsignedZero
+    def createLong(value: Long): BiggerDecimal = fromLong(value)
+    def createBigDecimal(unscaled: BigInteger, scale: Int): BiggerDecimal =
+      apply(unscaled, BigInteger.valueOf(scale.toLong))
+    def createBiggerDecimal(unscaled: BigInteger, scale: BigInteger): BiggerDecimal = apply(unscaled, scale)
+    def fail: BiggerDecimal = null
   }
-
-  private[this] final val FAILED = 0
-  private[this] final val START = 1
-  private[this] final val AFTER_ZERO = 2
-  private[this] final val AFTER_DOT = 3
-  private[this] final val FRACTIONAL = 4
-  private[this] final val AFTER_E = 5
-  private[this] final val AFTER_EXP_SIGN = 6
-  private[this] final val EXPONENT = 7
-  private[this] final val INTEGRAL = 8
 
   /**
    * Parse string into [[BiggerDecimal]].
@@ -259,129 +245,7 @@ final object BiggerDecimal {
   /**
    * Parse string into [[BiggerDecimal]], returning `null` on parsing failure.
    */
-  def parseBiggerDecimalUnsafe(input: String): BiggerDecimal = {
-    val len = input.length
-
-    if (len == 0) null else {
-      var zeros = 0
-      var decIndex = -1
-      var expIndex = -1
-      var i = if (input.charAt(0) == '-') 1 else 0
-      var c = input.charAt(i)
-
-      var state = if (input.charAt(i) != '0') START else {
-        i = i + 1
-        AFTER_ZERO
-      }
-
-      while (i < len && state != FAILED) {
-        val c = input.charAt(i)
-
-        (state: @switch) match {
-          case START =>
-            if (c >= '1' && c <= '9') {
-              state = INTEGRAL
-            } else {
-              state = FAILED
-            }
-          case AFTER_ZERO =>
-            if (c == '.') {
-              state = AFTER_DOT
-            } else if (c == 'e' || c == 'E') {
-              state = AFTER_E
-            } else {
-              state = FAILED
-            }
-          case INTEGRAL =>
-            if (c == '0') {
-              zeros = zeros + 1
-              state = INTEGRAL
-            } else if (c >= '1' && c <= '9') {
-              zeros = 0
-              state = INTEGRAL
-            } else if (c == '.') {
-              state = AFTER_DOT
-            } else if (c == 'e' || c == 'E') {
-              state = AFTER_E
-            } else {
-              state = FAILED
-            }
-          case AFTER_DOT =>
-            decIndex = i - 1
-            if (c == '0') {
-              zeros = zeros + 1
-              state = FRACTIONAL
-            } else if (c >= '1' && c <= '9') {
-              zeros = 0
-              state = FRACTIONAL
-            } else {
-              state = FAILED
-            }
-          case AFTER_E =>
-            expIndex = i - 1
-            if (c >= '0' && c <= '9') {
-              state = EXPONENT
-            } else if (c == '+' || c == '-') {
-              state = AFTER_EXP_SIGN
-            } else {
-              state = FAILED
-            }
-          case FRACTIONAL =>
-            if (c == '0') {
-              zeros = zeros + 1
-              state = FRACTIONAL
-            } else if (c >= '1' && c <= '9') {
-              zeros = 0
-              state = FRACTIONAL
-            } else if (c == 'e' || c == 'E') {
-              state = AFTER_E
-            } else {
-              state = FAILED
-            }
-          case AFTER_EXP_SIGN =>
-            if (c >= '0' && c <= '9') {
-              state = EXPONENT
-            } else {
-              state = FAILED
-            }
-          case EXPONENT =>
-            if (c >= '0' && c <= '9') {
-              state = EXPONENT
-            } else {
-              state = FAILED
-            }
-        }
-
-        i += 1
-      }
-
-      if (state == FAILED || state == AFTER_DOT || state == AFTER_E || state == AFTER_EXP_SIGN) null else {
-        val integral = if (decIndex >= 0) input.substring(0, decIndex) else {
-          if (expIndex == -1) input else {
-            input.substring(0, expIndex)
-          }
-        }
-
-        val fractional = if (decIndex == -1) "" else {
-          if (expIndex == -1) input.substring(decIndex + 1) else {
-            input.substring(decIndex + 1, expIndex)
-          }
-        }
-
-        val unscaledString = integral + fractional
-        val unscaled = new BigInteger(unscaledString.substring(0, unscaledString.length - zeros))
-
-        if (unscaled == BigInteger.ZERO) {
-          if (input.charAt(0) == '-') NegativeZero else UnsignedZero
-        } else {
-          val rescale = BigInteger.valueOf((fractional.length - zeros).toLong)
-          val scale = if (expIndex == -1) rescale else {
-            rescale.subtract(new BigInteger(input.substring(expIndex + 1)))
-          }
-
-          new SigAndExp(unscaled, scale)
-        }
-      }
-    }
+  def parseBiggerDecimalUnsafe(input: String): BiggerDecimal = if (!parser.validate(input)) null else {
+    parser.parseUnsafe(input)
   }
 }
